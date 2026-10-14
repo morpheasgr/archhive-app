@@ -1,9 +1,10 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   Bookmark,
   BookmarkCheck,
+  CloudDownload,
   EyeOff,
   LayoutGrid,
   List,
@@ -108,6 +109,7 @@ const REMOTE_SUGGEST_CACHE = new Map<string, string[]>();
 
 function BrowseDetailPage() {
   const { site, kind, slug } = Route.useParams();
+  const navigate = useNavigate();
   const cleanSlug = normalizeInitialSlug(slug);
   const browseSlug =
     site === "pornhub" && kind === "category" ? normalizePornhubCategorySlug(cleanSlug) : cleanSlug;
@@ -435,6 +437,37 @@ function BrowseDetailPage() {
       .catch(() => {});
   }, [site, kind, browseSlug, orientation, isPornhubAnimal, filtersKey]);
 
+  /** Save this search (with its filters) if needed, fetch every page of it
+   * into the Online library in the background, and open it there. */
+  async function fetchAllPages() {
+    if (savingSearch || !browseSlug) return;
+    setSavingSearch(true);
+    try {
+      let id = savedId;
+      if (!id) {
+        const saved = await api.saveSearch({
+          name: `${siteInfo?.display_name ?? site} ${kind}: ${browseSlug}${filtersKey ? " (filtered)" : ""}`,
+          site_id: site,
+          kind: kind as BrowseKind,
+          slug: browseSlug,
+          orientation: isPornhubAnimal ? orientation : undefined,
+          filters: filtersKey ? filters : undefined,
+        });
+        id = saved.id;
+        setSavedId(id);
+      }
+      await api.startFullFetch(id);
+      toast.success(
+        "Fetching every page in the background. It pauses by itself on rate limits and carries on afterwards.",
+      );
+      void navigate({ to: "/library/online", search: { search: id } });
+    } catch (e) {
+      toast.error(`Could not start: ${errorText(e)}`);
+    } finally {
+      setSavingSearch(false);
+    }
+  }
+
   async function toggleSavedSearch() {
     if (savingSearch) return;
     setSavingSearch(true);
@@ -682,6 +715,17 @@ function BrowseDetailPage() {
           >
             {savedId ? <BookmarkCheck className="h-4 w-4" /> : <Bookmark className="h-4 w-4" />}
             <span className="hidden sm:inline">{savedId ? "Saved" : "Save"}</span>
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => void fetchAllPages()}
+            disabled={savingSearch || !browseSlug}
+            title="Save this search and fetch all its pages into the Online library (slowly, pausing on rate limits)"
+            aria-label="Fetch all pages into the Online library"
+          >
+            <CloudDownload className="h-4 w-4" />
+            <span className="hidden sm:inline">Fetch all</span>
           </Button>
           {!isPhone && (
             <>
