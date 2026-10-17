@@ -101,41 +101,50 @@ impl SiteAdapter for ThotHubAdapter {
         // that loaded the page (otherwise it redirects to the fu.mp4
         // placeholder). The mirror it redirects to refuses the WebView's own
         // Referer, so play it through the loopback proxy with ThotHub's.
-        let resolved =
-            crate::sites::extractors::thothub::resolve_kvs_stream(ctx, url, self.id(), "ThotHub")
-                .await;
-        if let Ok(stream_url) = &resolved {
-            return Ok(maybe_loopback_proxy(ctx, stream_url, BASE));
+        let err = match crate::sites::extractors::thothub::resolve_kvs_stream(
+            ctx,
+            url,
+            self.id(),
+            "ThotHub",
+        )
+        .await
+        {
+            Ok(stream_url) => return Ok(maybe_loopback_proxy(ctx, &stream_url, BASE)),
+            Err(e) => e,
+        };
+        // A login-gated, private or bot-checked page won't play through
+        // yt-dlp either (it has no ThotHub extractor): report why.
+        if crate::sites::extractors::thothub::is_final_kvs_error(&err) {
+            return Err(err);
         }
 
-        #[cfg(mobile)]
-        {
-            return resolved;
+        // Fallback: yt-dlp resolves the stream. Desktop uses the sidecar binary;
+        // Android routes through the youtubedl-android plugin bridge (same path
+        // downloads use), so playback works wherever downloads work.
+        let runner = crate::sites::yt_dlp::SidecarRunner::new(ctx.app().clone());
+        let cookies = ctx.cookie_file_for_site(self.id());
+        let mut args = vec![
+            url.to_string(),
+            "--get-url".to_string(),
+            "--no-warnings".to_string(),
+            "--no-playlist".to_string(),
+        ];
+        if let Some(cookies) = cookies.as_ref() {
+            args.push("--cookies".to_string());
+            args.push(cookies.to_string_lossy().to_string());
         }
-
-        #[cfg(not(mobile))]
-        {
-            let runner = crate::sites::yt_dlp::SidecarRunner::new(ctx.app().clone());
-            let cookies = ctx.cookie_file_for_site(self.id());
-            let mut args = vec![
-                url.to_string(),
-                "--get-url".to_string(),
-                "--no-warnings".to_string(),
-                "--no-playlist".to_string(),
-            ];
-            if let Some(cookies) = cookies.as_ref() {
-                args.push("--cookies".to_string());
-                args.push(cookies.to_string_lossy().to_string());
-            }
-            let raw = runner.run_capture_for_stream_url("yt-dlp", &args).await?;
-            let stream_url = raw
-                .lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty())
-                .ok_or_else(|| crate::error::AppError::Other("No stream URL resolved".to_string()))?
-                .to_string();
-            Ok(maybe_loopback_proxy(ctx, &stream_url, BASE))
-        }
+        let raw = match runner.run_capture_for_stream_url("yt-dlp", &args).await {
+            Ok(raw) => raw,
+            // yt-dlp's "Unsupported URL" says less than the resolver's error.
+            Err(_) => return Err(err),
+        };
+        let stream_url = raw
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .ok_or_else(|| crate::error::AppError::Other("No stream URL resolved".to_string()))?
+            .to_string();
+        Ok(maybe_loopback_proxy(ctx, &stream_url, BASE))
     }
 }
 

@@ -89,6 +89,12 @@ pub async fn resolve_kvs_stream_as(
             "{site_name} returned HTTP {status} for the video page."
         )));
     }
+    if is_login_gated(&html) && pick_best_stream(&html, page_url).is_none() {
+        return Err(AppError::Site(format!(
+            "{site_name} needs a site session for this video. Log in via Settings → Cookies → \
+             {site_name}, then try again."
+        )));
+    }
     if is_private_video_page(&html) {
         return Err(AppError::Site(format!(
             "This is a private {site_name} video — only logged-in members can watch it. \
@@ -133,6 +139,27 @@ pub async fn resolve_kvs_stream_as(
         "{site_name} refused the video file (HTTP {}).",
         resp.status()
     )))
+}
+
+/// Resolver errors that yt-dlp can't get past either (it has no extractor
+/// for these KVS sites): login-gated, private, bot-checked or placeholder.
+pub fn is_final_kvs_error(err: &crate::error::AppError) -> bool {
+    let msg = err.to_string();
+    // Whole verdict phrases: "No player … may be private" is not a verdict.
+    [
+        "needs a site session for this video",
+        "This is a private",
+        "is showing a bot check",
+        "served its placeholder clip",
+    ]
+    .iter()
+    .any(|m| msg.contains(m))
+}
+
+/// KVS replaces the player config with a login redirect for gated videos:
+/// `pageContext = { videoId: '...', loginUrl: 'https://<host>/login-required/' }`.
+fn is_login_gated(html: &str) -> bool {
+    html.contains("login-required") || html.contains("loginUrl")
 }
 
 /// KVS "private video" pages: no player unless the viewer is a member.
@@ -420,5 +447,28 @@ var playercfg = {
             url.contains("/get_file/") && url.contains("720p"),
             "expected 720p get_file url, got {url}"
         );
+    }
+
+    #[test]
+    fn detects_login_gated_shell() {
+        // Real shape served for a gated video (the player config is replaced).
+        let html = r#"<script>
+		var pageContext = {
+									videoId: '916235',						loginUrl: 'https://thethothub.com/login-required/',
+			animation: '200'
+		};
+	</script>"#;
+        assert!(is_login_gated(html));
+        let verdict = |m: &str| is_final_kvs_error(&crate::error::AppError::Site(m.to_string()));
+        assert!(verdict(
+            "ThotHub needs a site session for this video. Log in via …"
+        ));
+        assert!(verdict(
+            "This is a private ThotHub video — only logged-in members …"
+        ));
+        assert!(!verdict(
+            "No player on this ThotHub page — the video may be private or …"
+        ));
+        assert!(!is_login_gated(FIXTURE));
     }
 }
