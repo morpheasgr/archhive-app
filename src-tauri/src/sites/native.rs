@@ -9,6 +9,9 @@
 //!   no extractor for it.
 //! - HQPorner: the video sits in a `mydaddy.cc` player iframe listing MP4s
 //!   per quality; yt-dlp has no extractor for it.
+//! - XVIDEOS / XNXX: the page hands its player the sources in script calls
+//!   (`html5player.setVideoHLS(…)`, `setVideoUrlHigh(…)`). yt-dlp on Android
+//!   fails on these sites ("I/O operation on closed file").
 
 use crate::error::{AppError, AppResult};
 use crate::sites::SiteContext;
@@ -25,6 +28,9 @@ pub async fn resolve_stream(
     }
     if host_is(&host, "hqporner.com") {
         return Some(hqporner_best(page_url).await);
+    }
+    if is_xvideos_family(page_url) {
+        return Some(xvideos_best(Some(ctx), page_url).await);
     }
     match crate::sites::extractors::thothub::resolve_kvs_stream(ctx, page_url, site_id, &host).await
     {
@@ -49,7 +55,57 @@ pub async fn resolve_download(page_url: &str) -> Option<AppResult<String>> {
     if host_is(&host, "hqporner.com") {
         return Some(hqporner_best(page_url).await);
     }
+    if is_xvideos_family(page_url) {
+        return Some(xvideos_best(None, page_url).await);
+    }
     None
+}
+
+/// XVIDEOS / XNXX video pages (their adapters also resolve natively).
+pub(crate) fn is_xvideos_family(page_url: &str) -> bool {
+    let host = host_of(page_url);
+    host_is(&host, "xvideos.com") || host_is(&host, "xnxx.com")
+}
+
+/// The best source an XVIDEOS / XNXX page gives its player: the HLS
+/// playlist (all qualities up to 1080p), else the MP4s. They play and
+/// download without cookies or a Referer. With `ctx` the page is fetched
+/// with the site's cookies (logged-in / age-verified sessions).
+pub(crate) async fn xvideos_best(ctx: Option<&SiteContext>, page_url: &str) -> AppResult<String> {
+    let site_id = if host_is(&host_of(page_url), "xnxx.com") {
+        "xnxx"
+    } else {
+        "xvideos"
+    };
+    let html = match ctx {
+        Some(ctx) => ctx.fetch_html(page_url, site_id).await?,
+        None => {
+            let client = reqwest::Client::builder()
+                .user_agent(crate::sites::BROWSER_UA)
+                .timeout(std::time::Duration::from_secs(30))
+                .build()?;
+            crate::sites::throttle::acquire(page_url).await?;
+            client.get(page_url).send().await?.text().await?
+        }
+    };
+    xvideos_sources(&html).ok_or_else(|| {
+        AppError::Site(format!(
+            "No video sources on this {} page — it may have been removed.",
+            if site_id == "xnxx" { "XNXX" } else { "XVIDEOS" }
+        ))
+    })
+}
+
+/// `setVideoHLS`, else `setVideoUrlHigh`, else `setVideoUrlLow`.
+fn xvideos_sources(html: &str) -> Option<String> {
+    ["setVideoHLS", "setVideoUrlHigh", "setVideoUrlLow"]
+        .iter()
+        .find_map(|call| {
+            let start = html.find(&format!("html5player.{call}('"))? + call.len() + 14;
+            let len = html[start..].find('\'')?;
+            let url = &html[start..start + len];
+            url.starts_with("http").then(|| url.to_string())
+        })
 }
 
 /// `resolve_kvs_stream` errors that are about the video itself, not about
@@ -273,5 +329,26 @@ mod tests {
             pick_xxxbp(&hls_only).as_deref(),
             Some("https://cdn.test/m.m3u8")
         );
+    }
+
+    #[test]
+    fn xvideos_sources_prefer_hls_then_mp4() {
+        let page = "html5player.setVideoTitle('t');\n\
+            html5player.setVideoUrlLow('https://mp4.example/sd.mp4?s=1');\n\
+            html5player.setVideoUrlHigh('https://mp4.example/hd.mp4?s=1');\n\
+            html5player.setVideoHLS('https://hls.example/a==,1/x/hls.m3u8');";
+        assert_eq!(
+            xvideos_sources(page).as_deref(),
+            Some("https://hls.example/a==,1/x/hls.m3u8")
+        );
+        let mp4_only = "html5player.setVideoUrlHigh('https://mp4.example/hd.mp4');";
+        assert_eq!(
+            xvideos_sources(mp4_only).as_deref(),
+            Some("https://mp4.example/hd.mp4")
+        );
+        assert_eq!(xvideos_sources("<html>removed</html>"), None);
+        assert!(is_xvideos_family("https://www.xvideos.com/video.abc/x"));
+        assert!(is_xvideos_family("https://www.xnxx.com/video-abc/x"));
+        assert!(!is_xvideos_family("https://www.xvideos.com.evil.example/x"));
     }
 }

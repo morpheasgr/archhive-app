@@ -813,13 +813,14 @@ async fn run_job_with_plan(
             if path_result.is_err() && !cancel.load(Ordering::Relaxed) {
                 return handle_stopped(&db, &app, &job_id);
             }
-            // Sites without their own adapter: when yt-dlp fails (no
-            // extractor, a broken one, a session-bound KVS link), try the
-            // native resolvers (KVS in-session, XXXBP, HQPorner) and fetch
-            // the stream directly.
+            // Sites without their own adapter, and XVIDEOS / XNXX: when
+            // yt-dlp fails (no extractor, a broken one, a session-bound KVS
+            // link), try the native resolvers (KVS in-session, XXXBP,
+            // HQPorner, XVIDEOS sources) and fetch the stream directly.
             let path_result = match path_result {
                 Err(e)
-                    if crate::sites::cookie_keys::is_host_key(&cookie_key)
+                    if (crate::sites::cookie_keys::is_host_key(&cookie_key)
+                        || crate::sites::native::is_xvideos_family(&plan.url))
                         && cancel.load(Ordering::Relaxed) =>
                 {
                     let ctx = app

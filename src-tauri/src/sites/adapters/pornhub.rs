@@ -115,6 +115,14 @@ macro_rules! ytdlp_tube_adapter {
             }
 
             async fn resolve_stream_url(&self, ctx: &SiteContext, url: &str) -> AppResult<String> {
+                // XVIDEOS / XNXX pages list their sources; read them first
+                // (yt-dlp on Android fails on these sites), yt-dlp after.
+                if crate::sites::native::is_xvideos_family(url) {
+                    match crate::sites::native::xvideos_best(Some(ctx), url).await {
+                        Ok(stream_url) => return Ok(stream_url),
+                        Err(e) => tracing::info!("[{}] native sources: {e}", $id),
+                    }
+                }
                 let runner = crate::sites::yt_dlp::SidecarRunner::new(ctx.app().clone());
                 let cookies = ctx.cookie_file_for_site($id);
                 let mut args = vec![
